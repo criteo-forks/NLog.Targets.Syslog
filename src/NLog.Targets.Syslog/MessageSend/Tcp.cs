@@ -56,14 +56,13 @@ namespace NLog.Targets.Syslog.MessageSend
                 .Then(_ => stream = SslDecorate(tcp), CancellationToken.None);
         }
 
-        protected override Task SendAsync(ByteArray message, CancellationToken token)
+        protected override void Send(ByteArray message, CancellationToken token)
         {
             if (token.IsCancellationRequested)
-                return Task.FromResult<object>(null);
+                return;
 
-            return FramingTask(message)
-                .Then(_ => WriteAsync(0, message, token), token)
-                .Unwrap();
+            FramingTask(message);
+            Write(0, message, token);
         }
 
         protected override void Terminate()
@@ -86,32 +85,32 @@ namespace NLog.Targets.Syslog.MessageSend
             return sslStream;
         }
 
-        private Task FramingTask(ByteArray message)
+        private void FramingTask(ByteArray message)
         {
             if (framing == FramingMethod.NonTransparent)
             {
                 message.Append(LineFeedBytes);
-                return Task.FromResult<object>(null);
+                return;
             }
 
             var octetCount = message.Length;
             var prefix = new ASCIIEncoding().GetBytes($"{octetCount} ");
-            return Task.Factory.SafeFromAsync(stream.BeginWrite, stream.EndWrite, prefix, 0, prefix.Length, null);
+            stream.Write(prefix, 0, prefix.Length);
         }
 
-        private Task WriteAsync(int offset, ByteArray data, CancellationToken token)
+        private void Write(int offset, ByteArray data, CancellationToken token)
         {
             if (token.IsCancellationRequested)
-                return Task.FromResult<object>(null);
+                return;
 
             var toBeWrittenTotal = data.Length - offset;
             var isLastWrite = toBeWrittenTotal <= dataChunkSize;
             var count = isLastWrite ? toBeWrittenTotal : dataChunkSize;
-
-            return Task.Factory
-                .SafeFromAsync(stream.BeginWrite, stream.EndWrite, (byte[])data, offset, count, null)
-                .Then(task => isLastWrite ? task : WriteAsync(offset + dataChunkSize, data, token), token)
-                .Unwrap();
+            while(offset < data.Length)
+            { 
+                stream.Write(data, offset, count);
+                offset += dataChunkSize;
+            }
         }
 
         private void DisposeSslStreamNotTcpClientInnerStream()

@@ -51,21 +51,23 @@ namespace NLog.Targets.Syslog.MessageSend
             Port = port;
         }
 
-        public Task SendMessageAsync(ByteArray message, CancellationToken token)
+        public void SendMessage(ByteArray message, CancellationToken token)
         {
             if (token.IsCancellationRequested)
-                return Task.FromResult<object>(null);
+                return;
 
             if (Ready)
-                return SendAsync(message, token);
+            {
+                Send(message, token);
+                return;
+            }
+                
 
             var delay = neverConnected ? ZeroSecondsTimeSpan : recoveryTime;
             neverConnected = false;
-            return Task.Delay(delay, token)
-                .Then(_ => ReInit(), token)
-                .Unwrap()
-                .Then(_ => SendAsync(message, token), token)
-                .Unwrap();
+            Thread.Sleep(delay);
+            ReInit();
+            Send(message, token);
         }
 
         public void Dispose()
@@ -78,7 +80,7 @@ namespace NLog.Targets.Syslog.MessageSend
 
         protected abstract Task Init();
 
-        protected abstract Task SendAsync(ByteArray message, CancellationToken token);
+        protected abstract void Send(ByteArray message, CancellationToken token);
 
         protected abstract void Terminate();
 

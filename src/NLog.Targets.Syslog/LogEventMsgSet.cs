@@ -36,51 +36,30 @@ namespace NLog.Targets.Syslog
             return this;
         }
 
-        public Task SendAsync(CancellationToken token)
+        public void Send(CancellationToken token)
         {
-            return SendAsync(token, new TaskCompletionSource<object>());
-        }
-
-        private Task SendAsync(CancellationToken token, TaskCompletionSource<object> tcs)
-        {
-            if (token.IsCancellationRequested)
-                return tcs.CanceledTask();
-
-            var allSent = currentMessage == logEntries.Length;
-            if (allSent)
-                return tcs.SucceededTask(() => asyncLogEvent.Continuation(null));
-
-            try
+            while (currentMessage < logEntries.Length)
             {
-                PrepareMessage();
+                if (token.IsCancellationRequested)
+                    return;
 
-                messageTransmitter
-                    .SendMessageAsync(buffer, token)
-                    .ContinueWith(t =>
+                try
+                {
+                    messageBuilder.PrepareMessage(buffer, asyncLogEvent.LogEvent, logEntries[currentMessage++]);
+                    messageTransmitter.SendMessage(buffer, token);
+                    if (token.IsCancellationRequested)
                     {
-                        if (t.IsCanceled)
-                            return tcs.CanceledTask();
-                        if (t.Exception != null)
-                        {
-                            asyncLogEvent.Continuation(t.Exception.GetBaseException());
-                            tcs.SetException(t.Exception);
-                            return Task.FromResult<object>(null);
-                        }
-                        return SendAsync(token, tcs);
-                    }, token, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Current)
-                    .Unwrap();
-
-                return tcs.Task;
+                        return;
+                    }
+                }
+                catch (Exception ex)
+                {
+                    asyncLogEvent.Continuation(ex);
+                    throw;
+                }
             }
-            catch (Exception exception)
-            {
-                return tcs.FailedTask(exception);
-            }
-        }
 
-        private void PrepareMessage()
-        {
-            messageBuilder.PrepareMessage(buffer, asyncLogEvent.LogEvent, logEntries[currentMessage++]);
+            asyncLogEvent.Continuation(null);
         }
 
         public override string ToString()
