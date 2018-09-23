@@ -15,10 +15,7 @@ namespace NLog.Targets.Syslog.MessageSend
         private readonly int connectionCheckTimeout;
         private UdpClient udp;
 
-        protected override bool Ready
-        {
-            get { return udp?.Client?.IsConnected(connectionCheckTimeout) == true; }
-        }
+        protected override bool Ready => true;
 
         public Udp(UdpConfig udpConfig) : base(udpConfig.Server, udpConfig.Port, udpConfig.ReconnectInterval)
         {

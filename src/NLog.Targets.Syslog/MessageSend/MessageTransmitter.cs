@@ -56,7 +56,7 @@ namespace NLog.Targets.Syslog.MessageSend
             if (token.IsCancellationRequested)
                 return;
 
-            if (Ready)
+            if (!neverConnected && Ready)
             {
                 Send(message, token);
                 return;
