@@ -24,6 +24,7 @@ namespace NLog.Targets.Syslog
         private readonly BlockingCollection<AsyncLogEventInfo> queue;
         private readonly ByteArray buffer;
         private readonly MessageTransmitter messageTransmitter;
+        private readonly Task processingQueueTask;
 
         public AsyncLogger(Layout loggingLayout, EnforcementConfig enforcementConfig, MessageBuilder messageBuilder, MessageTransmitterConfig messageTransmitterConfig)
         {
@@ -34,7 +35,7 @@ namespace NLog.Targets.Syslog
             queue = NewBlockingCollection();
             buffer = new ByteArray(enforcementConfig.TruncateMessageTo);
             messageTransmitter = MessageTransmitter.FromConfig(messageTransmitterConfig);
-            Task.Run(() => ProcessQueueAsync(messageBuilder));
+            processingQueueTask = Task.Factory.StartNew(() => ProcessQueue(messageBuilder), CancellationToken.None, TaskCreationOptions.LongRunning, TaskScheduler.Default);
         }
 
         public void Log(AsyncLogEventInfo asyncLogEvent)
@@ -51,50 +52,24 @@ namespace NLog.Targets.Syslog
                 new BlockingCollection<AsyncLogEventInfo>();
         }
 
-        private void ProcessQueueAsync(MessageBuilder messageBuilder)
+        private void ProcessQueue(MessageBuilder messageBuilder)
         {
-            ProcessQueueAsync(messageBuilder, new TaskCompletionSource<object>())
-                .ContinueWith(t =>
+            while (!token.IsCancellationRequested)
+            {
+                try
                 {
-                    InternalLogger.Warn(t.Exception?.GetBaseException(), "ProcessQueueAsync faulted within try");
-                    ProcessQueueAsync(messageBuilder);
-                }, token, TaskContinuationOptions.ExecuteSynchronously | TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Current);
-        }
-
-        private Task ProcessQueueAsync(MessageBuilder messageBuilder, TaskCompletionSource<object> tcs)
-        {
-            if (token.IsCancellationRequested)
-                return tcs.CanceledTask();
-
-            try
-            {
-                var asyncLogEventInfo = queue.Take(token);
-                var logEventMsgSet = new LogEventMsgSet(asyncLogEventInfo, buffer, messageBuilder, messageTransmitter);
-
-                logEventMsgSet
-                    .Build(layout)
-                    .SendAsync(token)
-                    .ContinueWith(t =>
-                    {
-                        if (t.IsCanceled)
-                        {
-                            InternalLogger.Debug("Task canceled");
-                            tcs.SetCanceled();
-                            return;
-                        }
-                        if (t.Exception != null) // t.IsFaulted is true
-                            InternalLogger.Warn(t.Exception.GetBaseException(), "Task faulted");
-                        else
-                            InternalLogger.Debug("Successfully sent message '{0}'", logEventMsgSet);
-                        ProcessQueueAsync(messageBuilder, tcs);
-                    }, token, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Current);
-
-                return tcs.Task;
+                    var asyncLogEventInfo = queue.Take(token);
+                    var logEventMsgSet =
+                        new LogEventMsgSet(asyncLogEventInfo, buffer, messageBuilder, messageTransmitter);
+                    logEventMsgSet.Build(layout).Send(token);
+                    InternalLogger.Debug("Successfully sent message '{0}'", logEventMsgSet);
+                }
+                catch (Exception ex)
+                {
+                    InternalLogger.Warn(ex, "ProcessQueue faulted within try");
+                }
             }
-            catch (Exception exception)
-            {
-                return tcs.FailedTask(exception);
-            }
+            InternalLogger.Debug("Task canceled");
         }
 
         private void Enqueue(AsyncLogEventInfo asyncLogEventInfo, int timeout)

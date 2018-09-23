@@ -25,17 +25,16 @@ namespace NLog.Targets.Syslog.MessageSend
             connectionCheckTimeout = udpConfig.ConnectionCheckTimeout;
         }
 
-        protected override Task Init()
+        protected override void Init()
         {
             udp = new UdpClient(IpAddress, Port);
-            return Task.FromResult<object>(null);
         }
 
-        protected override Task SendAsync(ByteArray message, CancellationToken token)
+        protected override void Send(ByteArray message, CancellationToken token)
         {
             if (token.IsCancellationRequested)
-                return Task.FromResult<object>(null);
-            return udp.SendAsync(message, message.Length);
+                return;
+            udp.Send(message, message.Length);
         }
 
         protected override void Terminate()
