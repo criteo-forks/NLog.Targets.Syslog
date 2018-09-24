@@ -14,8 +14,10 @@ namespace NLog.Targets.Syslog.MessageSend
     {
         private readonly int connectionCheckTimeout;
         private UdpClient udp;
+        private DateTime nextRefresh = DateTime.MinValue;
+        private bool ready = false;
 
-        protected override bool Ready => true;
+        protected override bool Ready => DateTime.UtcNow < nextRefresh;
 
         public Udp(UdpConfig udpConfig) : base(udpConfig.Server, udpConfig.Port, udpConfig.ReconnectInterval)
         {
@@ -25,6 +27,7 @@ namespace NLog.Targets.Syslog.MessageSend
         protected override void Init()
         {
             udp = new UdpClient(IpAddress, Port);
+            nextRefresh = DateTime.UtcNow + TimeSpan.FromMinutes(5);
         }
 
         protected override void Send(ByteArray message, CancellationToken token)
