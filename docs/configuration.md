@@ -55,8 +55,7 @@ A more detailed example is [included](../src/TestAppWithGUI/NLog.config) in the 
 
  - `throttling` - settings related to message throttling:
     - `limit` - the number of log entries, waiting to be processed, that triggers throttling (default: `65536`; `0` means no limit)
-    - `strategy` - `None` / `DiscardOnFixedTimeout` / `DiscardOnPercentageTimeout` / `Discard` / `DeferForFixedTime` / `DeferForPercentageTime` / `Block` (default: `Discard`)
-    - `delay` - the milliseconds/percentage delay for a `DiscardOnFixedTimeout` / `DiscardOnPercentageTimeout` / `Defer` throttling strategy (default: `0`)
+    - `strategy` - `None` / `Discard` (default: `Discard`)
  - `messageProcessors` - the amount of parallel message processors (default: `1`; `0` means `Environment.ProcessorCount`)
  - `splitOnNewLine` - whether or not to split each log entry by newlines and send each line separately (default: `false`)
  - `transliterate` - `false` or `true` to transliterate strings from Unicode to ASCII when the RFC allows only ASCII characters for a field (default: `false`)

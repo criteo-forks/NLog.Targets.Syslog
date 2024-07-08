@@ -4,6 +4,7 @@
 using System;
 using System.Collections.Concurrent;
 using System.Threading;
+using System.Threading.Channels;
 using System.Threading.Tasks;
 using NLog.Common;
 using NLog.Layouts;
@@ -19,105 +20,95 @@ namespace NLog.Targets.Syslog
     internal class AsyncLogger
     {
         private readonly Layout layout;
-        private readonly Throttling throttling;
         private readonly CancellationTokenSource cts;
         private readonly CancellationToken token;
-        private readonly BlockingCollection<AsyncLogEventInfo> queue;
+        private readonly Channel<AsyncLogEventInfo> channel;
         private readonly ByteArray buffer;
         private readonly MessageTransmitter messageTransmitter;
         private readonly LogEventInfo flushCompletionMarker;
-        private readonly Action<AsyncLogEventInfo, int> processWithTimeoutAction;
-        private readonly Action<AsyncLogEventInfo> discardAction;
 
         public AsyncLogger(Layout loggingLayout, EnforcementConfig enforcementConfig, MessageBuilder messageBuilder, MessageTransmitterConfig messageTransmitterConfig)
         {
             layout = loggingLayout;
             cts = new CancellationTokenSource();
             token = cts.Token;
-            throttling = Throttling.FromConfig(enforcementConfig.Throttling);
-            queue = NewBlockingCollection();
+            channel = NewChannel(enforcementConfig.Throttling);
             buffer = new ByteArray(enforcementConfig.TruncateMessageTo);
             messageTransmitter = MessageTransmitter.FromConfig(messageTransmitterConfig);
             flushCompletionMarker = new LogEventInfo(LogLevel.Off, string.Empty, nameof(flushCompletionMarker));
             Task.Run(() => ProcessQueueAsync(messageBuilder));
-            processWithTimeoutAction = (asyncLogEventInfo, timeout) => Enqueue(asyncLogEventInfo, timeout);
-            discardAction = asyncLogEventInfo => asyncLogEventInfo.Continuation(new InvalidOperationException($"Enqueue skipped"));
         }
 
         public void Log(AsyncLogEventInfo asyncLogEventInfo)
         {
-            throttling.Apply(queue.Count, asyncLogEventInfo, processWithTimeoutAction, discardAction);
+            Enqueue(asyncLogEventInfo);
         }
 
         public Task FlushAsync()
         {
             var flushTcs = new TaskCompletionSource<object>();
-            Enqueue(flushCompletionMarker.WithContinuation(_ => flushTcs.SetResult(null)), Timeout.Infinite);
+            Enqueue(flushCompletionMarker.WithContinuation(_ => flushTcs.SetResult(null)));
             return flushTcs.Task;
         }
 
-        private BlockingCollection<AsyncLogEventInfo> NewBlockingCollection()
+        private Channel<AsyncLogEventInfo> NewChannel(ThrottlingConfig throttlingConfig)
         {
-            var throttlingLimit = throttling.Limit;
-
-            return throttling.BoundedBlockingCollectionNeeded ?
-                new BlockingCollection<AsyncLogEventInfo>(throttlingLimit) :
-                new BlockingCollection<AsyncLogEventInfo>();
+            return throttlingConfig.Strategy switch
+            {
+                ThrottlingStrategy.None => Channel.CreateUnbounded<AsyncLogEventInfo>(),
+                ThrottlingStrategy.Discard => Channel.CreateBounded<AsyncLogEventInfo>(throttlingConfig.Limit),
+                _ => throw new NotSupportedException($"Throttling strategy {throttlingConfig.Strategy} is not supported anymore")
+            };
         }
 
-        private void ProcessQueueAsync(MessageBuilder messageBuilder)
+        private async Task ProcessQueueAsync(MessageBuilder messageBuilder)
         {
-            ProcessQueueAsync(messageBuilder, new TaskCompletionSource<object>())
-                .ContinueWith(t =>
+            while (true)
+            {
+                try
                 {
-                    InternalLogger.Warn(t.Exception?.GetBaseException(), "[Syslog] ProcessQueueAsync faulted within try");
-                    ProcessQueueAsync(messageBuilder);
-                }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously | TaskContinuationOptions.OnlyOnFaulted, TaskScheduler.Current);
+                    await ProcessQueueAsync(messageBuilder, new TaskCompletionSource());
+                }
+                catch (OperationCanceledException)
+                {
+                    throw;
+                }
+                catch (Exception e)
+                {
+                    InternalLogger.Warn(e, "[Syslog] ProcessQueueAsync faulted within try");
+                }
+            }
         }
 
-        private Task ProcessQueueAsync(MessageBuilder messageBuilder, TaskCompletionSource<object> tcs)
+        private async Task ProcessQueueAsync(MessageBuilder messageBuilder, TaskCompletionSource tcs)
         {
-            if (token.IsCancellationRequested)
+            await foreach (var asyncLogEventInfo in channel.Reader.ReadAllAsync(token))
             {
-                tcs.SetCanceled();
-                return tcs.Task;
-            }
-
-            try
-            {
-                var asyncLogEventInfo = queue.Take(token);
-                var logEventMsgSet = new LogEventMsgSet(asyncLogEventInfo, buffer, messageBuilder, messageTransmitter);
-                logEventMsgSet
-                    .Build(layout)
-                    .SendAsync(token)
-                    .ContinueWith(t =>
+                LogEventMsgSet logEventMsgSet = new(asyncLogEventInfo, buffer, messageBuilder, messageTransmitter);
+                try
+                {
+                    await logEventMsgSet.Build(layout).SendAsync(token);
+                    if (InternalLogger.IsDebugEnabled)
                     {
-                        var exception = t.Exception;
-                        if (token.IsCancellationRequested || t.IsCanceled)
-                        {
-                            InternalLogger.Debug("[Syslog] Task canceled");
-                            tcs.SetCanceled();
-                            return;
-                        }
-                        if (exception != null) // t.IsFaulted is true
-                            InternalLogger.Warn(exception.GetBaseException(), "[Syslog] Task faulted");
-                        else
-                            InternalLogger.Debug("[Syslog] Successfully handled message '{0}'", logEventMsgSet);
-                        ProcessQueueAsync(messageBuilder, tcs);
-                    }, CancellationToken.None, TaskContinuationOptions.ExecuteSynchronously, TaskScheduler.Current);
-
-                return tcs.Task;
-            }
-            catch (Exception exception)
-            {
-                tcs.SetException(exception);
-                return tcs.Task;
+                        InternalLogger.Debug("[Syslog] Successfully handled message '{0}'", logEventMsgSet);
+                    }
+                }
+                catch (OperationCanceledException)
+                {
+                    InternalLogger.Debug("[Syslog] Task canceled");
+                    tcs.SetCanceled(token);
+                    return;
+                }
+                catch (Exception e)
+                {
+                    InternalLogger.Warn(e.GetBaseException(), "[Syslog] Task faulted");
+                }
             }
         }
 
-        private void Enqueue(AsyncLogEventInfo asyncLogEventInfo, int timeout)
+        private void Enqueue(AsyncLogEventInfo asyncLogEventInfo)
         {
-            bool enqueued = queue.TryAdd(asyncLogEventInfo, timeout, token);
+            bool enqueued = channel.Writer.TryWrite(asyncLogEventInfo);
 
             if (InternalLogger.IsDebugEnabled)
             {
@@ -125,14 +116,15 @@ namespace NLog.Targets.Syslog
             }
 
             if (!enqueued)
-                asyncLogEventInfo.Continuation(new InvalidOperationException($"Failed enqueuing"));
+            {
+                asyncLogEventInfo.Continuation(new InvalidOperationException("Failed enqueuing"));
+            }
         }
 
         public void Dispose()
         {
             cts.Cancel();
-            queue.CompleteAdding();
-            queue.Dispose();
+            channel.Writer.Complete();
             messageTransmitter.Dispose();
             buffer.Dispose();
             cts.Dispose();

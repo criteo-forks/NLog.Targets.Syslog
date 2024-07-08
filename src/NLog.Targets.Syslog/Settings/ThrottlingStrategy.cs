@@ -1,6 +1,8 @@
 // Licensed under the BSD license
 // See the LICENSE file in the project root for more information
 
+using System;
+
 namespace NLog.Targets.Syslog.Settings
 {
     /// <summary>The throttling strategy to be used</summary>
@@ -9,22 +11,22 @@ namespace NLog.Targets.Syslog.Settings
         /// <summary>No throttling strategy</summary>
         None,
 
-        /// <summary>Discard after a fixed timeout</summary>
+        [Obsolete]
         DiscardOnFixedTimeout,
 
-        /// <summary>Discard after a timeout percentage of the log entries waiting to be processed</summary>
+        [Obsolete]
         DiscardOnPercentageTimeout,
 
         /// <summary>Discard log entries</summary>
         Discard,
 
-        /// <summary>Defer for a fixed time</summary>
+        [Obsolete]
         DeferForFixedTime,
 
-        /// <summary>Defer for a time percentage of the log entries waiting to be processed</summary>
+        [Obsolete]
         DeferForPercentageTime,
 
-        /// <summary>Block indefinitely until waiting log entries decrease</summary>
+        [Obsolete]
         Block
     }
 }
